@@ -21,6 +21,9 @@ type LeashIntegrations struct {
 	AuthToken string
 	// HTTPClient is the HTTP client used for requests. Defaults to http.DefaultClient.
 	HTTPClient *http.Client
+	// APIKey is an optional API key for service-to-service authentication.
+	// When set, it is sent as the X-API-Key header on every request.
+	APIKey string
 }
 
 // New creates a LeashIntegrations client with the default platform URL.
@@ -88,6 +91,9 @@ func (l *LeashIntegrations) call(provider, action string, body any) (json.RawMes
 	if l.AuthToken != "" {
 		req.Header.Set("Authorization", "Bearer "+l.AuthToken)
 	}
+	if l.APIKey != "" {
+		req.Header.Set("X-API-Key", l.APIKey)
+	}
 
 	httpClient := l.HTTPClient
 	if httpClient == nil {
@@ -147,6 +153,9 @@ func (l *LeashIntegrations) GetConnections() ([]ConnectionStatus, error) {
 
 	if l.AuthToken != "" {
 		req.Header.Set("Authorization", "Bearer "+l.AuthToken)
+	}
+	if l.APIKey != "" {
+		req.Header.Set("X-API-Key", l.APIKey)
 	}
 
 	httpClient := l.HTTPClient
