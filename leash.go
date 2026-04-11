@@ -71,6 +71,10 @@ func (l *LeashIntegrations) Call(provider, action string, body any) (json.RawMes
 
 // call is the internal HTTP call method used by all provider clients.
 func (l *LeashIntegrations) call(provider, action string, body any) (json.RawMessage, error) {
+	if l.APIKey == "" {
+		return nil, fmt.Errorf("API key required. Set client.APIKey or create one with `leash keys create <app-name>` or in your app settings at leash.build")
+	}
+
 	endpoint := fmt.Sprintf("%s/api/integrations/%s/%s", l.PlatformURL, provider, action)
 
 	var reqBody io.Reader
