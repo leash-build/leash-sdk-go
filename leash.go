@@ -25,6 +25,8 @@ type LeashIntegrations struct {
 	// APIKey is an optional API key for service-to-service authentication.
 	// When set, it is sent as the X-API-Key header on every request.
 	APIKey string
+
+	envCache map[string]string
 }
 
 // New creates a LeashIntegrations client with the default platform URL.
@@ -287,6 +289,140 @@ func (l *LeashIntegrations) GetConnections() ([]ConnectionStatus, error) {
 	}
 
 	return connections, nil
+}
+
+// MCP calls any MCP server tool directly via the Leash platform.
+//
+// It sends a POST request to /api/mcp/run with the given npm package name,
+// tool name, and optional arguments, then returns the raw JSON data.
+func (l *LeashIntegrations) MCP(npmPackage, tool string, args any) (json.RawMessage, error) {
+	endpoint := fmt.Sprintf("%s/api/mcp/run", l.PlatformURL)
+
+	payload := map[string]any{
+		"package": npmPackage,
+		"tool":    tool,
+	}
+	if args != nil {
+		payload["args"] = args
+	}
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("leash: failed to marshal request body: %w", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("leash: failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	if l.AuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+l.AuthToken)
+	}
+	if l.APIKey != "" {
+		req.Header.Set("X-API-Key", l.APIKey)
+	}
+
+	httpClient := l.HTTPClient
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("leash: request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("leash: failed to read response: %w", err)
+	}
+
+	var apiResp apiResponse
+	if err := json.Unmarshal(respBody, &apiResp); err != nil {
+		return nil, fmt.Errorf("leash: failed to parse response: %w", err)
+	}
+
+	if !apiResp.Success {
+		return nil, &Error{
+			Message:    apiResp.ErrorMsg,
+			Code:       apiResp.Code,
+			ConnectURL: apiResp.ConnectURL,
+		}
+	}
+
+	return apiResp.Data, nil
+}
+
+// GetEnv fetches all environment variables from the Leash platform.
+// The result is cached after the first call.
+func (l *LeashIntegrations) GetEnv() (map[string]string, error) {
+	if l.envCache != nil {
+		return l.envCache, nil
+	}
+
+	endpoint := fmt.Sprintf("%s/api/apps/env", l.PlatformURL)
+
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("leash: failed to create request: %w", err)
+	}
+
+	if l.AuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+l.AuthToken)
+	}
+	if l.APIKey != "" {
+		req.Header.Set("X-API-Key", l.APIKey)
+	}
+
+	httpClient := l.HTTPClient
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("leash: request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("leash: failed to read response: %w", err)
+	}
+
+	var apiResp apiResponse
+	if err := json.Unmarshal(respBody, &apiResp); err != nil {
+		return nil, fmt.Errorf("leash: failed to parse response: %w", err)
+	}
+
+	if !apiResp.Success {
+		return nil, &Error{
+			Message:    apiResp.ErrorMsg,
+			Code:       apiResp.Code,
+			ConnectURL: apiResp.ConnectURL,
+		}
+	}
+
+	var envMap map[string]string
+	if err := json.Unmarshal(apiResp.Data, &envMap); err != nil {
+		return nil, fmt.Errorf("leash: failed to parse env data: %w", err)
+	}
+
+	l.envCache = envMap
+	return l.envCache, nil
+}
+
+// GetEnvKey fetches a single environment variable by key.
+// Returns the value and an error. If the key is not found, the value is empty.
+func (l *LeashIntegrations) GetEnvKey(key string) (string, error) {
+	envMap, err := l.GetEnv()
+	if err != nil {
+		return "", err
+	}
+	return envMap[key], nil
 }
 
 // GetConnectURL returns the URL to initiate an OAuth connection flow for
