@@ -61,6 +61,98 @@ func (l *LeashIntegrations) Drive() *DriveClient {
 	return &DriveClient{client: l}
 }
 
+// Integration returns a CustomIntegration for the given integration name.
+// This is the escape hatch for custom/untyped integrations that don't have
+// dedicated provider clients.
+func (l *LeashIntegrations) Integration(name string) *CustomIntegration {
+	return &CustomIntegration{name: name, client: l}
+}
+
+// CustomIntegration provides an untyped client for a custom integration.
+// It proxies requests through the Leash platform at
+// /api/integrations/custom/{name}.
+type CustomIntegration struct {
+	name   string
+	client *LeashIntegrations
+}
+
+// CustomCallRequest is the request body sent to the custom integration proxy.
+type CustomCallRequest struct {
+	Path    string            `json:"path"`
+	Method  string            `json:"method"`
+	Body    any               `json:"body,omitempty"`
+	Headers map[string]string `json:"headers,omitempty"`
+}
+
+// Call invokes the custom integration proxy endpoint.
+//
+// It sends a POST request to /api/integrations/custom/{name} with the given
+// path, method, and optional body/headers forwarded to the upstream service.
+func (c *CustomIntegration) Call(path string, method string, body any) (json.RawMessage, error) {
+	return c.CallWithHeaders(path, method, body, nil)
+}
+
+// CallWithHeaders is like Call but also forwards custom headers.
+func (c *CustomIntegration) CallWithHeaders(path string, method string, body any, headers map[string]string) (json.RawMessage, error) {
+	endpoint := fmt.Sprintf("%s/api/integrations/custom/%s", c.client.PlatformURL, c.name)
+
+	payload := CustomCallRequest{
+		Path:    path,
+		Method:  method,
+		Body:    body,
+		Headers: headers,
+	}
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("leash: failed to marshal request body: %w", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("leash: failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	if c.client.AuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.client.AuthToken)
+	}
+	if c.client.APIKey != "" {
+		req.Header.Set("X-API-Key", c.client.APIKey)
+	}
+
+	httpClient := c.client.HTTPClient
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("leash: request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("leash: failed to read response: %w", err)
+	}
+
+	var apiResp apiResponse
+	if err := json.Unmarshal(respBody, &apiResp); err != nil {
+		return nil, fmt.Errorf("leash: failed to parse response: %w", err)
+	}
+
+	if !apiResp.Success {
+		return nil, &Error{
+			Message:    apiResp.ErrorMsg,
+			Code:       apiResp.Code,
+			ConnectURL: apiResp.ConnectURL,
+		}
+	}
+
+	return apiResp.Data, nil
+}
+
 // Call performs a generic integration API call. It sends a POST request to
 // the platform proxy at /api/integrations/{provider}/{action} and returns
 // the raw JSON data from the response.
