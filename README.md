@@ -70,6 +70,27 @@ client = leash.NewWithURL("your-platform-jwt", "https://staging.leash.build")
 client.APIKey = "optional-app-api-key"
 ```
 
+## Server Auth
+
+The SDK provides helpers for authenticating users on the server side by reading
+the `leash-auth` cookie set by the Leash platform.
+
+```go
+func meHandler(w http.ResponseWriter, r *http.Request) {
+    user, err := leash.GetLeashUser(r)
+    if err != nil { http.Error(w, "unauthorized", 401); return }
+    json.NewEncoder(w).Encode(user)
+}
+```
+
+## MCP Calls
+
+Execute MCP-backed tools through the platform:
+
+```go
+result, err := client.RunMCP("@some/mcp-package", "tool-name", map[string]any{"key": "value"})
+```
+
 ## Notes
 
 - `auth_token` should be a valid Leash platform JWT.
