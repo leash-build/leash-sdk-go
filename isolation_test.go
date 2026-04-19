@@ -126,6 +126,14 @@ func main() {
 		t.Fatal(err)
 	}
 
+	// Run go mod tidy to resolve transitive dependencies from the local SDK.
+	tidyCmd := exec.Command("go", "mod", "tidy")
+	tidyCmd.Dir = tmpDir
+	tidyCmd.Env = append(os.Environ(), "GOFLAGS=")
+	if output, err := tidyCmd.CombinedOutput(); err != nil {
+		t.Fatalf("go mod tidy failed:\n%s\n%v", string(output), err)
+	}
+
 	// Run go build in the temp directory. If the SDK pulls in any web
 	// framework dependency that isn't available, this will fail.
 	cmd := exec.Command("go", "build", "-o", filepath.Join(tmpDir, "test_binary"), ".")
