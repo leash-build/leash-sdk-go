@@ -767,6 +767,177 @@ func TestCustomIntegration(t *testing.T) {
 	})
 }
 
+// --- Access Token ---
+
+func TestGetAccessToken(t *testing.T) {
+	var gotPath, gotMethod, gotContentType string
+	var gotBody map[string]any
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		gotContentType = r.Header.Get("Content-Type")
+		b, _ := io.ReadAll(r.Body)
+		json.Unmarshal(b, &gotBody)
+		fmt.Fprint(w, successResponse(map[string]string{
+			"accessToken": "ya29.token-value",
+			"provider":    "slack",
+		}))
+	}))
+	defer ts.Close()
+
+	client := newTestClient(ts.URL)
+
+	t.Run("returns access token on success", func(t *testing.T) {
+		token, err := client.GetAccessToken("slack")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if token != "ya29.token-value" {
+			t.Errorf("expected token=%q, got %q", "ya29.token-value", token)
+		}
+		if gotPath != "/api/integrations/token" {
+			t.Errorf("expected path=%q, got %q", "/api/integrations/token", gotPath)
+		}
+		if gotMethod != http.MethodPost {
+			t.Errorf("expected POST, got %s", gotMethod)
+		}
+		if gotContentType != "application/json" {
+			t.Errorf("expected Content-Type=application/json, got %q", gotContentType)
+		}
+		if gotBody["provider"] != "slack" {
+			t.Errorf("expected provider=slack in body, got %v", gotBody["provider"])
+		}
+	})
+
+	t.Run("auth headers sent", func(t *testing.T) {
+		var gotAuth, gotAPIKey string
+		ts2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotAuth = r.Header.Get("Authorization")
+			gotAPIKey = r.Header.Get("X-API-Key")
+			fmt.Fprint(w, successResponse(map[string]string{"accessToken": "tok", "provider": "gmail"}))
+		}))
+		defer ts2.Close()
+
+		c := newTestClient(ts2.URL)
+		_, _ = c.GetAccessToken("gmail")
+		if gotAuth != "Bearer test-jwt-token" {
+			t.Errorf("expected auth header, got %q", gotAuth)
+		}
+		if gotAPIKey != "test-api-key" {
+			t.Errorf("expected api key header, got %q", gotAPIKey)
+		}
+	})
+}
+
+func TestGetAccessToken_NotConnected(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, errorResponse("Slack not connected", "not_connected", "https://leash.build/connect/slack"))
+	}))
+	defer ts.Close()
+
+	client := newTestClient(ts.URL)
+	token, err := client.GetAccessToken("slack")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if token != "" {
+		t.Errorf("expected empty token on error, got %q", token)
+	}
+
+	leashErr, ok := err.(*Error)
+	if !ok {
+		t.Fatalf("expected *Error, got %T", err)
+	}
+	if leashErr.Code != "not_connected" {
+		t.Errorf("expected code=%q, got %q", "not_connected", leashErr.Code)
+	}
+	if leashErr.ConnectURL != "https://leash.build/connect/slack" {
+		t.Errorf("unexpected connectURL: %q", leashErr.ConnectURL)
+	}
+}
+
+// --- Custom MCP Config ---
+
+func TestGetCustomMcpConfig(t *testing.T) {
+	var gotPath, gotMethod, gotAuth, gotAPIKey string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		gotAuth = r.Header.Get("Authorization")
+		gotAPIKey = r.Header.Get("X-API-Key")
+		fmt.Fprint(w, successResponse(map[string]any{
+			"slug":        "acme-notion",
+			"displayName": "Acme Notion",
+			"url":         "https://mcp.acme.example.com/notion",
+			"headers": map[string]string{
+				"Authorization": "Bearer mcp-token-123",
+				"X-Acme-Tenant": "acme",
+			},
+		}))
+	}))
+	defer ts.Close()
+
+	client := newTestClient(ts.URL)
+	config, err := client.GetCustomMcpConfig("acme-notion")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config == nil {
+		t.Fatal("expected non-nil config")
+	}
+	if gotPath != "/api/integrations/mcp-config/acme-notion" {
+		t.Errorf("expected path=%q, got %q", "/api/integrations/mcp-config/acme-notion", gotPath)
+	}
+	if gotMethod != http.MethodGet {
+		t.Errorf("expected GET, got %s", gotMethod)
+	}
+	if gotAuth != "Bearer test-jwt-token" {
+		t.Errorf("expected auth header, got %q", gotAuth)
+	}
+	if gotAPIKey != "test-api-key" {
+		t.Errorf("expected api key header, got %q", gotAPIKey)
+	}
+	if config.Slug != "acme-notion" {
+		t.Errorf("expected slug=%q, got %q", "acme-notion", config.Slug)
+	}
+	if config.DisplayName != "Acme Notion" {
+		t.Errorf("expected displayName=%q, got %q", "Acme Notion", config.DisplayName)
+	}
+	if config.URL != "https://mcp.acme.example.com/notion" {
+		t.Errorf("unexpected url: %q", config.URL)
+	}
+	if config.Headers["Authorization"] != "Bearer mcp-token-123" {
+		t.Errorf("expected resolved Authorization header, got %q", config.Headers["Authorization"])
+	}
+	if config.Headers["X-Acme-Tenant"] != "acme" {
+		t.Errorf("expected X-Acme-Tenant header, got %q", config.Headers["X-Acme-Tenant"])
+	}
+}
+
+func TestGetCustomMcpConfig_UnknownMcpServer(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, errorResponse("Unknown MCP server", "unknown_mcp_server", ""))
+	}))
+	defer ts.Close()
+
+	client := newTestClient(ts.URL)
+	config, err := client.GetCustomMcpConfig("does-not-exist")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if config != nil {
+		t.Errorf("expected nil config on error, got %+v", config)
+	}
+
+	leashErr, ok := err.(*Error)
+	if !ok {
+		t.Fatalf("expected *Error, got %T", err)
+	}
+	if leashErr.Code != "unknown_mcp_server" {
+		t.Errorf("expected code=%q, got %q", "unknown_mcp_server", leashErr.Code)
+	}
+}
+
 // --- Request Body ---
 
 func TestCall_SendsRequestBody(t *testing.T) {
