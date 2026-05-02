@@ -47,6 +47,8 @@ The SDK calls routes such as:
 
 - `/api/integrations/{provider}/{action}`
 - `/api/integrations/connections`
+- `/api/integrations/token`
+- `/api/integrations/mcp-config/{slug}`
 - `/api/apps/env`
 - `/api/mcp/run`
 
@@ -59,6 +61,8 @@ The SDK calls routes such as:
 - connect URL generation
 - generic provider calls
 - custom integration calls
+- access token fetch for built-in or org-registered providers
+- custom MCP server config resolution
 - app env fetch and caching
 
 ## Example Initialization
@@ -89,6 +93,29 @@ Execute MCP-backed tools through the platform:
 
 ```go
 result, err := client.RunMCP("@some/mcp-package", "tool-name", map[string]any{"key": "value"})
+```
+
+## Access Tokens
+
+Fetch the user's current access token for any built-in or org-registered
+provider. Refresh-on-expiry happens transparently on the platform side, so
+callers always get a usable token.
+
+```go
+token, err := client.GetAccessToken("slack")
+if err != nil { log.Fatal(err) }
+// Call Slack's API directly with `token`.
+```
+
+## Custom MCP Servers
+
+Resolve the URL and auth headers for a customer-registered MCP server, then
+feed them straight into your MCP client. Leash isn't on the MCP request path.
+
+```go
+cfg, err := client.GetCustomMcpConfig("acme-notion")
+if err != nil { log.Fatal(err) }
+// cfg.URL + cfg.Headers["Authorization"] etc.
 ```
 
 ## Notes

@@ -46,6 +46,21 @@ type ConnectionStatus struct {
 	ExpiresAt  string `json:"expiresAt,omitempty"`
 }
 
+// CustomMcpServerConfig is the resolved config for a customer-registered MCP
+// server (LEA-143). Feed this directly into your MCP client — Leash isn't on
+// the MCP request path.
+type CustomMcpServerConfig struct {
+	// Slug is the unique identifier for the MCP server.
+	Slug string `json:"slug"`
+	// DisplayName is the human-readable name of the MCP server.
+	DisplayName string `json:"displayName"`
+	// URL is the customer's MCP endpoint.
+	URL string `json:"url"`
+	// Headers are the headers to attach to every request, including the
+	// resolved Authorization header for bearer-auth servers.
+	Headers map[string]string `json:"headers"`
+}
+
 // --- Gmail types ---
 
 // ListMessagesParams configures a Gmail ListMessages request.

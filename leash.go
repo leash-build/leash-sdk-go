@@ -434,3 +434,136 @@ func (l *LeashIntegrations) GetConnectURL(providerID string, returnURL string) s
 	}
 	return u
 }
+
+// tokenResponse is the shape of the data field in a successful response from
+// POST /api/integrations/token.
+type tokenResponse struct {
+	AccessToken string `json:"accessToken"`
+	Provider    string `json:"provider"`
+}
+
+// GetAccessToken returns the user's current access token for a provider —
+// built-in or org-registered (LEA-142). Use this to call third-party APIs
+// directly without proxying every request through Leash. Refresh-on-expiry
+// happens transparently on the platform side.
+//
+// Returns a *Error with Code="not_connected" when the user hasn't completed
+// the OAuth flow for this provider.
+func (l *LeashIntegrations) GetAccessToken(provider string) (string, error) {
+	endpoint := fmt.Sprintf("%s/api/integrations/token", l.PlatformURL)
+
+	payload := map[string]string{"provider": provider}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("leash: failed to marshal request body: %w", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(data))
+	if err != nil {
+		return "", fmt.Errorf("leash: failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	if l.AuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+l.AuthToken)
+	}
+	if l.APIKey != "" {
+		req.Header.Set("X-API-Key", l.APIKey)
+	}
+
+	httpClient := l.HTTPClient
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("leash: request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("leash: failed to read response: %w", err)
+	}
+
+	var apiResp apiResponse
+	if err := json.Unmarshal(respBody, &apiResp); err != nil {
+		return "", fmt.Errorf("leash: failed to parse response: %w", err)
+	}
+
+	if !apiResp.Success {
+		return "", &Error{
+			Message:    apiResp.ErrorMsg,
+			Code:       apiResp.Code,
+			ConnectURL: apiResp.ConnectURL,
+		}
+	}
+
+	var token tokenResponse
+	if err := json.Unmarshal(apiResp.Data, &token); err != nil {
+		return "", fmt.Errorf("leash: failed to parse token data: %w", err)
+	}
+
+	return token.AccessToken, nil
+}
+
+// GetCustomMcpConfig returns the resolved config for a customer-registered
+// MCP server (LEA-143). The returned config contains the customer's MCP URL
+// plus auth headers (e.g. "Authorization: Bearer …" for bearer-auth servers)
+// — feed it directly into your MCP client. Leash isn't on the MCP request
+// path.
+//
+// Returns a *Error with Code="unknown_mcp_server" when the slug isn't
+// registered for the caller's org.
+func (l *LeashIntegrations) GetCustomMcpConfig(slug string) (*CustomMcpServerConfig, error) {
+	endpoint := fmt.Sprintf("%s/api/integrations/mcp-config/%s", l.PlatformURL, url.PathEscape(slug))
+
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("leash: failed to create request: %w", err)
+	}
+
+	if l.AuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+l.AuthToken)
+	}
+	if l.APIKey != "" {
+		req.Header.Set("X-API-Key", l.APIKey)
+	}
+
+	httpClient := l.HTTPClient
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("leash: request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("leash: failed to read response: %w", err)
+	}
+
+	var apiResp apiResponse
+	if err := json.Unmarshal(respBody, &apiResp); err != nil {
+		return nil, fmt.Errorf("leash: failed to parse response: %w", err)
+	}
+
+	if !apiResp.Success {
+		return nil, &Error{
+			Message:    apiResp.ErrorMsg,
+			Code:       apiResp.Code,
+			ConnectURL: apiResp.ConnectURL,
+		}
+	}
+
+	var config CustomMcpServerConfig
+	if err := json.Unmarshal(apiResp.Data, &config); err != nil {
+		return nil, fmt.Errorf("leash: failed to parse mcp config: %w", err)
+	}
+
+	return &config, nil
+}
