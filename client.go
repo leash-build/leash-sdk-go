@@ -39,7 +39,12 @@ type Client struct {
 // Auth precedence (highest first), matching the TS + Python surface:
 //
 //  1. LEASH_API_KEY env var (or [WithAPIKey] option) — server-to-server key
-//  2. Authorization: Bearer <jwt> header — captured but only used for /auth
+//  2. Authorization: Bearer <jwt> header from r — used for /api/auth/me
+//     (identity) AND, only when no API key is configured, as a fallback
+//     bearer on env-fetch endpoints (/api/apps/me/secrets/*). It is NEVER
+//     forwarded on integration POSTs — see [Transport.post]. This Bearer→env
+//     fallback exists so a JWT-only caller (e.g. a script holding a user
+//     token but no LEASH_API_KEY) can still read env vars.
 //  3. leash-auth cookie — forwarded to the platform for integration calls
 //
 // Returns a non-nil error only on construction-time problems (none today —
