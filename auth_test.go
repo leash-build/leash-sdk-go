@@ -1,229 +1,209 @@
 package leash
 
 import (
-	"encoding/base64"
-	"encoding/json"
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 	"time"
-
-	"github.com/golang-jwt/jwt/v5"
 )
 
-const testSecret = "test-jwt-secret-key"
-
-// makeToken creates a signed JWT with the given claims and secret.
-func makeToken(claims jwt.MapClaims, secret string) string {
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	s, _ := token.SignedString([]byte(secret))
-	return s
-}
-
-// makeUnsignedToken creates a JWT-shaped string (header.payload.signature)
-// without a valid signature, for testing unverified decoding.
-func makeUnsignedToken(claims map[string]any) string {
-	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
-	payload, _ := json.Marshal(claims)
-	payloadEnc := base64.RawURLEncoding.EncodeToString(payload)
-	return header + "." + payloadEnc + ".fakesignature"
-}
-
-func validClaims() jwt.MapClaims {
-	return jwt.MapClaims{
-		"sub":     "user-123",
-		"email":   "alice@example.com",
-		"name":    "Alice Smith",
-		"picture": "https://example.com/alice.jpg",
-		"exp":     float64(time.Now().Add(1 * time.Hour).Unix()),
+func TestExtractCookie(t *testing.T) {
+	r := requestWithCookie(CookieName, "abc")
+	if got := extractCookie(r, CookieName); got != "abc" {
+		t.Errorf("expected abc, got %q", got)
+	}
+	if got := extractCookie(r, "other"); got != "" {
+		t.Errorf("expected empty for missing cookie, got %q", got)
+	}
+	if got := extractCookie(nil, CookieName); got != "" {
+		t.Errorf("expected empty for nil request, got %q", got)
 	}
 }
 
-func requestWithCookie(cookieValue string) *http.Request {
-	r := httptest.NewRequest(http.MethodGet, "/", nil)
-	r.AddCookie(&http.Cookie{Name: "leash-auth", Value: cookieValue})
-	return r
+func TestExtractBearer(t *testing.T) {
+	cases := []struct {
+		name   string
+		header string
+		want   string
+	}{
+		{"valid", "Bearer abc", "abc"},
+		{"lowercase scheme", "bearer abc", "abc"},
+		{"trims whitespace", "Bearer  spaced ", "spaced"},
+		{"basic auth", "Basic abc", ""},
+		{"empty", "", ""},
+		{"no scheme", "abc", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodGet, "/", nil)
+			if c.header != "" {
+				r.Header.Set("Authorization", c.header)
+			}
+			if got := extractBearerToken(r); got != c.want {
+				t.Errorf("got %q, want %q", got, c.want)
+			}
+		})
+	}
 }
 
-func TestGetLeashUser_ValidToken(t *testing.T) {
-	os.Setenv("LEASH_JWT_SECRET", testSecret)
-	defer os.Unsetenv("LEASH_JWT_SECRET")
+func TestDecodeToken_VerifiedHappyPath(t *testing.T) {
+	t.Setenv("LEASH_JWT_SECRET", testJWTSecret)
+	tok := makeToken(t, nil, testJWTSecret, time.Hour)
+	payload, err := decodeToken(tok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payload.Sub != "user-123" {
+		t.Errorf("expected sub=user-123, got %q", payload.Sub)
+	}
+}
 
-	token := makeToken(validClaims(), testSecret)
-	r := requestWithCookie(token)
+func TestDecodeToken_ExpiredRejected(t *testing.T) {
+	t.Setenv("LEASH_JWT_SECRET", testJWTSecret)
+	tok := makeToken(t, nil, testJWTSecret, -time.Hour)
+	_, err := decodeToken(tok)
+	if err == nil {
+		t.Fatal("expected error for expired token")
+	}
+	var lerr *LeashError
+	if !errors.As(err, &lerr) || lerr.Code != CodeNoAuthContext {
+		t.Errorf("expected CodeNoAuthContext, got %v", err)
+	}
+}
 
+func TestDecodeToken_WrongSecretRejected(t *testing.T) {
+	t.Setenv("LEASH_JWT_SECRET", testJWTSecret)
+	tok := makeToken(t, nil, "other-secret", time.Hour)
+	if _, err := decodeToken(tok); err == nil {
+		t.Fatal("expected signature-mismatch error")
+	}
+}
+
+func TestDecodeToken_MalformedRejected(t *testing.T) {
+	if _, err := decodeToken("garbage"); err == nil {
+		t.Fatal("expected malformed-token error")
+	}
+}
+
+func TestDecodeToken_NoSecretDevFallback(t *testing.T) {
+	t.Setenv("LEASH_JWT_SECRET", "")
+	claims := map[string]any{
+		"sub":   "user-789",
+		"email": "bob@example.com",
+		"name":  "Bob",
+		"exp":   time.Now().Add(time.Hour).Unix(),
+	}
+	tok := makeUnsignedToken(t, claims)
+	payload, err := decodeToken(tok)
+	if err != nil {
+		t.Fatalf("expected dev fallback to accept, got %v", err)
+	}
+	if payload.Sub != "user-789" {
+		t.Errorf("unexpected sub: %q", payload.Sub)
+	}
+}
+
+func TestDecodeToken_NoSecretStillChecksExpiry(t *testing.T) {
+	t.Setenv("LEASH_JWT_SECRET", "")
+	claims := map[string]any{
+		"sub": "u",
+		"exp": time.Now().Add(-time.Hour).Unix(),
+	}
+	tok := makeUnsignedToken(t, claims)
+	if _, err := decodeToken(tok); err == nil {
+		t.Fatal("expected expiry rejection even without secret")
+	}
+}
+
+func TestPayloadToUser_PrefersUserId(t *testing.T) {
+	user, err := payloadToUser(&LeashJWTPayload{UserID: "primary", Sub: "fallback", Email: "a@b.c", Name: "A"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if user.ID != "primary" {
+		t.Errorf("expected primary, got %q", user.ID)
+	}
+}
+
+func TestPayloadToUser_FallsBackToSub(t *testing.T) {
+	user, err := payloadToUser(&LeashJWTPayload{Sub: "fallback", Email: "a@b.c", Name: "A"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if user.ID != "fallback" {
+		t.Errorf("expected fallback, got %q", user.ID)
+	}
+}
+
+func TestPayloadToUser_MissingIDFails(t *testing.T) {
+	if _, err := payloadToUser(&LeashJWTPayload{Email: "a@b.c"}); err == nil {
+		t.Fatal("expected error for missing id")
+	}
+}
+
+func TestGetLeashUser_Happy(t *testing.T) {
+	t.Setenv("LEASH_JWT_SECRET", testJWTSecret)
+	tok := makeToken(t, nil, testJWTSecret, time.Hour)
+	r := requestWithCookie(CookieName, tok)
 	user, err := GetLeashUser(r)
 	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-	if user.ID != "user-123" {
-		t.Errorf("expected ID=%q, got %q", "user-123", user.ID)
+		t.Fatal(err)
 	}
 	if user.Email != "alice@example.com" {
-		t.Errorf("expected Email=%q, got %q", "alice@example.com", user.Email)
-	}
-	if user.Name != "Alice Smith" {
-		t.Errorf("expected Name=%q, got %q", "Alice Smith", user.Name)
-	}
-	if user.Picture != "https://example.com/alice.jpg" {
-		t.Errorf("expected Picture=%q, got %q", "https://example.com/alice.jpg", user.Picture)
+		t.Errorf("unexpected email: %q", user.Email)
 	}
 }
 
 func TestGetLeashUser_MissingCookie(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
-
 	_, err := GetLeashUser(r)
-	if err != ErrNoCookie {
-		t.Errorf("expected ErrNoCookie, got %v", err)
+	if err == nil {
+		t.Fatal("expected error for missing cookie")
+	}
+	var lerr *LeashError
+	if !errors.As(err, &lerr) || lerr.Code != CodeNoAuthContext {
+		t.Errorf("expected CodeNoAuthContext, got %v", err)
 	}
 }
 
-func TestGetLeashUser_InvalidToken(t *testing.T) {
-	os.Setenv("LEASH_JWT_SECRET", testSecret)
-	defer os.Unsetenv("LEASH_JWT_SECRET")
-
-	r := requestWithCookie("not-a-valid-jwt")
-
-	_, err := GetLeashUser(r)
-	if err != ErrInvalidToken {
-		t.Errorf("expected ErrInvalidToken, got %v", err)
+func TestIsAuthenticated(t *testing.T) {
+	t.Setenv("LEASH_JWT_SECRET", testJWTSecret)
+	tok := makeToken(t, nil, testJWTSecret, time.Hour)
+	if !IsAuthenticated(requestWithCookie(CookieName, tok)) {
+		t.Error("expected authenticated")
+	}
+	if IsAuthenticated(httptest.NewRequest(http.MethodGet, "/", nil)) {
+		t.Error("expected unauthenticated without cookie")
+	}
+	if IsAuthenticated(requestWithCookie(CookieName, "garbage")) {
+		t.Error("expected unauthenticated with garbage cookie")
 	}
 }
 
-func TestGetLeashUser_ExpiredToken(t *testing.T) {
-	os.Setenv("LEASH_JWT_SECRET", testSecret)
-	defer os.Unsetenv("LEASH_JWT_SECRET")
-
-	claims := validClaims()
-	claims["exp"] = float64(time.Now().Add(-1 * time.Hour).Unix())
-	token := makeToken(claims, testSecret)
-	r := requestWithCookie(token)
-
-	_, err := GetLeashUser(r)
-	if err != ErrExpiredToken {
-		t.Errorf("expected ErrExpiredToken, got %v", err)
-	}
-}
-
-func TestGetLeashUser_WrongSecret(t *testing.T) {
-	os.Setenv("LEASH_JWT_SECRET", testSecret)
-	defer os.Unsetenv("LEASH_JWT_SECRET")
-
-	token := makeToken(validClaims(), "wrong-secret")
-	r := requestWithCookie(token)
-
-	_, err := GetLeashUser(r)
-	if err != ErrInvalidToken {
-		t.Errorf("expected ErrInvalidToken, got %v", err)
-	}
-}
-
-func TestGetLeashUser_NoSecret_DecodesWithoutVerification(t *testing.T) {
-	os.Unsetenv("LEASH_JWT_SECRET")
-
-	claims := map[string]any{
-		"sub":     "user-456",
-		"email":   "bob@example.com",
-		"name":    "Bob Jones",
-		"picture": "https://example.com/bob.jpg",
-		"exp":     float64(time.Now().Add(1 * time.Hour).Unix()),
-	}
-	token := makeUnsignedToken(claims)
-	r := requestWithCookie(token)
-
-	user, err := GetLeashUser(r)
+func TestAuthNamespace_UserReturnsNilOnNoCookie(t *testing.T) {
+	c, _ := New(httptest.NewRequest(http.MethodGet, "/", nil))
+	user, err := c.Auth().User(context.Background())
 	if err != nil {
-		t.Fatalf("expected no error without secret, got %v", err)
+		t.Errorf("expected no error for unauthenticated, got %v", err)
 	}
-	if user.ID != "user-456" {
-		t.Errorf("expected ID=%q, got %q", "user-456", user.ID)
+	if user != nil {
+		t.Errorf("expected nil user, got %+v", user)
 	}
-	if user.Email != "bob@example.com" {
-		t.Errorf("expected Email=%q, got %q", "bob@example.com", user.Email)
-	}
-	if user.Name != "Bob Jones" {
-		t.Errorf("expected Name=%q, got %q", "Bob Jones", user.Name)
+	if c.Auth().IsAuthenticated() {
+		t.Error("expected IsAuthenticated=false")
 	}
 }
 
-func TestGetLeashUser_NoSecret_ExpiredToken(t *testing.T) {
-	os.Unsetenv("LEASH_JWT_SECRET")
-
-	claims := map[string]any{
-		"sub":   "user-789",
-		"email": "expired@example.com",
-		"exp":   float64(time.Now().Add(-1 * time.Hour).Unix()),
-	}
-	token := makeUnsignedToken(claims)
-	r := requestWithCookie(token)
-
-	_, err := GetLeashUser(r)
-	if err != ErrExpiredToken {
-		t.Errorf("expected ErrExpiredToken, got %v", err)
-	}
-}
-
-func TestIsAuthenticated_True(t *testing.T) {
-	os.Setenv("LEASH_JWT_SECRET", testSecret)
-	defer os.Unsetenv("LEASH_JWT_SECRET")
-
-	token := makeToken(validClaims(), testSecret)
-	r := requestWithCookie(token)
-
-	if !IsAuthenticated(r) {
-		t.Error("expected IsAuthenticated to return true for valid token")
-	}
-}
-
-func TestIsAuthenticated_False_NoCookie(t *testing.T) {
-	r := httptest.NewRequest(http.MethodGet, "/", nil)
-
-	if IsAuthenticated(r) {
-		t.Error("expected IsAuthenticated to return false with no cookie")
-	}
-}
-
-func TestIsAuthenticated_False_InvalidToken(t *testing.T) {
-	os.Setenv("LEASH_JWT_SECRET", testSecret)
-	defer os.Unsetenv("LEASH_JWT_SECRET")
-
-	r := requestWithCookie("garbage")
-
-	if IsAuthenticated(r) {
-		t.Error("expected IsAuthenticated to return false for invalid token")
-	}
-}
-
-func TestIsAuthenticated_False_ExpiredToken(t *testing.T) {
-	os.Setenv("LEASH_JWT_SECRET", testSecret)
-	defer os.Unsetenv("LEASH_JWT_SECRET")
-
-	claims := validClaims()
-	claims["exp"] = float64(time.Now().Add(-1 * time.Hour).Unix())
-	token := makeToken(claims, testSecret)
-	r := requestWithCookie(token)
-
-	if IsAuthenticated(r) {
-		t.Error("expected IsAuthenticated to return false for expired token")
-	}
-}
-
-func TestGetLeashUser_WorksWithStandardHTTPRequest(t *testing.T) {
-	os.Setenv("LEASH_JWT_SECRET", testSecret)
-	defer os.Unsetenv("LEASH_JWT_SECRET")
-
-	// Use httptest.NewRequest which returns a standard *http.Request
-	token := makeToken(validClaims(), testSecret)
-	r := httptest.NewRequest(http.MethodGet, "https://myapp.example.com/dashboard", nil)
-	r.AddCookie(&http.Cookie{Name: "leash-auth", Value: token})
-
-	user, err := GetLeashUser(r)
+func TestAuthNamespace_SwallowsDecodeErrors(t *testing.T) {
+	r := requestWithCookie(CookieName, "garbage-jwt")
+	c, _ := New(r)
+	user, err := c.Auth().User(context.Background())
 	if err != nil {
-		t.Fatalf("expected no error with standard http.Request, got %v", err)
+		t.Errorf("Auth.User should swallow decode errors, got %v", err)
 	}
-	if user.Email != "alice@example.com" {
-		t.Errorf("expected Email=%q, got %q", "alice@example.com", user.Email)
+	if user != nil {
+		t.Errorf("expected nil user for garbage token, got %+v", user)
 	}
 }
